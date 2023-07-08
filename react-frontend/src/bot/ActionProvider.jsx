@@ -4,43 +4,15 @@ import { createChatBotMessage, createClientMessage, createCustomMessage } from '
 const ActionProvider = (props) => {
   const {createChatBotMessage, setState, children} = props;
 
-  const handleHello = () => {
-    const botMessage = createChatBotMessage('Hello. Nice to meet you.');
+  const handleByOpenAI = async (message) => {
+    const encodedMessage = encodeURIComponent(message);
+    const response = await fetch(`http://127.0.0.1:5000/openai/chat/${encodedMessage}`);
+    const data = await response.json();
+    const responseMessage = createChatBotMessage(data);
 
     setState((prev) => ({
       ...prev,
-      messages: [...prev.messages, botMessage],
-    }));
-  };
-
-  const handleDog = () => {
-    const botMessage = createChatBotMessage(
-      "Here's a nice dog picture for you!",
-      {
-        widget: 'dogPicture',
-      }
-    );
-
-    setState((prev) => ({
-      ...prev,
-      messages: [...prev.messages, botMessage],
-    }));
-  };
-
-  const handleClientMessage = () => {
-    const message = createClientMessage('Hello client message!');
-    setState((prev) => ({
-      ...prev,
-      messages: [...prev.messages, message],
-    }));
-  };
-
-  const handleCustomMessage = () => {
-    // 1st. argument is the text value, 2nd. argument is the name of the registered custom message.
-    const message = createCustomMessage('value to input', 'custom');
-    setState((prev) => ({
-      ...prev,
-      messages: [...prev.messages, message],
+      messages: [...prev.messages, responseMessage],
     }));
   };
 
@@ -49,10 +21,7 @@ const ActionProvider = (props) => {
       {React.Children.map(children, (child) => {
         return React.cloneElement(child, {
           actions: {
-            handleHello,
-            handleDog,
-            handleClientMessage,
-            handleCustomMessage,
+            handleByOpenAI
           },
         });
       })}
