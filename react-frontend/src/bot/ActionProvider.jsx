@@ -6,7 +6,7 @@ const ActionProvider = (props) => {
 
   const handleByOpenAI = async (message) => {
     const encodedMessage = encodeURIComponent(message);
-    const response = await fetch(`http://127.0.0.1:5000/openai/chat/${encodedMessage}`);
+    const response = await fetch(`http://127.0.0.1:5000/langchain/chat/vector/${encodedMessage}`);
     const data = await response.json();
     const responseMessage = createChatBotMessage(data);
 
