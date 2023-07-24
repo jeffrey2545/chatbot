@@ -12,19 +12,21 @@ from dotenv import load_dotenv
 import openai
 
 from langchain.llms import OpenAI
+# from langchain.document_loaders import UnstructuredHTMLLoader
 from langchain.chains import ConversationChain, ConversationalRetrievalChain
 from langchain.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from langchain.prompts import PromptTemplate
 from langchain.prompts.chat import (
-  ChatPromptTemplate,
-  SystemMessagePromptTemplate,
-  HumanMessagePromptTemplate
+    ChatPromptTemplate,
+    SystemMessagePromptTemplate,
+    HumanMessagePromptTemplate
 )
 
 from langchain.embeddings.sentence_transformer import SentenceTransformerEmbeddings
-from langchain.text_splitter import CharacterTextSplitter
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.document_loaders import PyPDFLoader
 from langchain.vectorstores import Chroma
 
@@ -35,27 +37,39 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 os.environ["OPENAI_API_KEY"] = ""
+
+# memory and message related
 messages = [
     {"role": "assistant", "content": "You are a NBA expert."}
 ]
+
+# TO DO
+# 試著改成用memory而不是chat_history，可以研究是否要用ConversationBufferMemory或是有其他更好的套件，同時也研究參數怎麼放
+# 記得在改成memory時，147行要刪掉，163行要加上memory，175行要刪掉，172行要修改
 chat_history = []
+memory_test = ConversationBufferMemory()# Initialize memory buffer
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)# Initialize memory buffer
 
-# Initialize memory buffer
-memory = ConversationBufferMemory()
-
-# load the document and split it into chunks
-loader = PyPDFLoader("DevOps-Homework.pdf")
+# Load Unstructured data
+loader = PyPDFLoader("The_Three_Little_Pigs.pdf")# load the document
+# loader = UnstructuredHTMLLoader("apple.html")
 documents = loader.load()
 
-# split it into chunks
-text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
-docs = text_splitter.split_documents(documents)
+# TO DO
+# 研究是否有更好的spliiter，以及chunk_size和chunk_overlap要設多少比較適合
+# Splitting data
+text_splitter = RecursiveCharacterTextSplitter(chunk_size = 500, chunk_overlap = 50)# split it into chunks
+splitted_docs = text_splitter.split_documents(documents)
 
-# create the open-source embedding function
-embedding_function = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
+# TO DO
+# 研究是否有更好的embedding function
+# Create the embedding function
+embedding_function = OpenAIEmbeddings()
 
-# load it into Chroma
-vector_space = Chroma.from_documents(docs, embedding_function)
+# Store into vector store
+vector_space = Chroma.from_documents(documents = splitted_docs, embedding = embedding_function)# Embed and store the splits into Chroma
+
+# Make as retriever
 retriever = vector_space.as_retriever()
 
 ######################################################################
@@ -82,7 +96,7 @@ def openai_get_response(send_message):
     messages.append(user_message)
 
     response_message = openai.ChatCompletion.create(
-        model = "gpt-3.5-turbo",
+        model = "gpt-4-0613",
         messages = messages,
         temperature = 0.2,
     )
@@ -107,7 +121,7 @@ def langchain_get_response(send_message):
     conversation = ConversationChain(
         llm = llm,
         verbose = True,
-        memory = memory
+        memory = memory_test
     )
     response_message = conversation.predict(input = send_message)
     print(response_message)
@@ -143,17 +157,15 @@ def langchain_vector_get_response(send_message):
     prompt = ChatPromptTemplate.from_messages(initial_messages)
 
     # The LLM is an OpenAI object that is used to generate the response from the LangChain API.
-    llm = OpenAI(model_name="gpt-3.5-turbo", temperature=0.2)
-
-    # The retriever is a ChromaVectorSpace object that is used to retrieve the response from the vector space.
-    retriever = Chroma.from_documents(docs, embedding_function)
+    llm = OpenAI(model_name = "gpt-3.5-turbo-16k", temperature = 0.2)
 
     # The chain object is a ConversationalRetrievalChain object that is created from the LLM and retriever objects.
     chain = ConversationalRetrievalChain.from_llm(
         llm,
-        retriever,
-        condense_question_prompt=prompt,
-        verbose=True
+        retriever = retriever,
+        condense_question_prompt = prompt,
+        verbose = True,
+        chain_type = "map_reduce"
     )
 
     # The response message is a dictionary that contains the response from the LangChain API.

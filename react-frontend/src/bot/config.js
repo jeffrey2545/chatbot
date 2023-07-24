@@ -1,7 +1,7 @@
 import { createChatBotMessage } from 'react-chatbot-kit';
 import DogPicture from './DogPicture.jsx';
 
-const botName = 'CPA tutor';
+const botName = 'an AI chatbot';
 
 const config = {
   initialMessages: [createChatBotMessage(`Hi! I'm ${botName}`)],
