@@ -11,13 +11,15 @@ from dotenv import load_dotenv
 
 import openai
 
+from langchain import SerpAPIWrapper
 from langchain.llms import OpenAI
 # from langchain.document_loaders import UnstructuredHTMLLoader
-from langchain.chains import ConversationChain, ConversationalRetrievalChain
+from langchain.chains import ConversationChain, ConversationalRetrievalChain, LLMChain, RetrievalQA
+from langchain.agents import OpenAIFunctionsAgent, AgentExecutor, initialize_agent, Tool, AgentType
 from langchain.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
-from langchain.prompts import PromptTemplate
+from langchain.prompts import PromptTemplate, MessagesPlaceholder
 from langchain.prompts.chat import (
     ChatPromptTemplate,
     SystemMessagePromptTemplate,
@@ -36,7 +38,8 @@ from langchain.vectorstores import Chroma
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
-os.environ["OPENAI_API_KEY"] = ""
+os.environ["OPENAI_API_KEY"] = "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"
+os.environ["SERPAPI_API_KEY"] = "1395cc6c7eaf7514e460050cc27d499a252f2ffbe79070bcb0fa9e02f9055524"
 
 # memory and message related
 messages = [
@@ -48,7 +51,11 @@ messages = [
 # 記得在改成memory時，147行要刪掉，163行要加上memory，175行要刪掉，172行要修改
 chat_history = []
 memory_test = ConversationBufferMemory()# Initialize memory buffer
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)# Initialize memory buffer
+memory_test2 = ConversationBufferMemory(memory_key="chat_history", return_messages=True)# Initialize memory buffer
+agent_kwargs = {
+    "extra_prompt_messages": [MessagesPlaceholder(variable_name = "memory")],
+}
+memory = ConversationBufferMemory(memory_key = "memory", return_messages = True)
 
 # Load Unstructured data
 loader = PyPDFLoader("The_Three_Little_Pigs.pdf")# load the document
@@ -165,7 +172,6 @@ def langchain_vector_get_response(send_message):
         retriever = retriever,
         condense_question_prompt = prompt,
         verbose = True,
-        chain_type = "map_reduce"
     )
 
     # The response message is a dictionary that contains the response from the LangChain API.
@@ -176,3 +182,60 @@ def langchain_vector_get_response(send_message):
 
     # The function returns the response message as JSON.
     return jsonify(response_message['answer']), status.HTTP_200_OK
+
+######################################################################
+# API using langchain with agent
+######################################################################
+@app.route("/langchain/chat/agent/<string:send_message>", methods=["GET"])
+def langchain_agent_get_response(send_message):
+    filter_template = """
+        Determine whether this question is related to NBA, if is related, say true, if not, say false.
+        {question}
+    """
+    filter_messages = [
+        SystemMessagePromptTemplate.from_template(filter_template),
+        HumanMessagePromptTemplate.from_template('{question}')
+    ]
+    filter_prompt = ChatPromptTemplate.from_messages(filter_messages)
+    filter_llm = OpenAI(model_name = "gpt-3.5-turbo", temperature = 0.2)
+    filter_chain = LLMChain(
+        llm = filter_llm,
+        prompt = filter_prompt
+    )
+    filter_response = filter_chain({'question': send_message})
+    if filter_response['text'] == "False" or filter_response['text'] == "false":
+        filter_error = """
+            Sorry, this is not related to NBA.
+        """
+        return jsonify(filter_error), status.HTTP_200_OK
+
+    # agent_prompt = "You are very powerful assistant, and while answerng question, you will first search in the database"
+    agent_search = SerpAPIWrapper()
+    agent_llm = OpenAI(model_name = "gpt-3.5-turbo", temperature = 0.2)
+    agent_db = RetrievalQA.from_chain_type(llm = agent_llm, chain_type = "stuff", retriever = retriever)
+    agent_tools = [
+        Tool(
+            name = "search in the database",
+            func = agent_db.run,
+            description = "useful for when you want to find answer in the database."
+        ),
+        Tool(
+            name = "search in Google",
+            func = agent_search.run,
+            description = "useful for when you cannot find answer in the database and need to search."
+        ),
+    ]
+    agent = initialize_agent(
+        tools = agent_tools,
+        llm = agent_llm,
+        agent = AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        verbose = True,
+        agent_kwargs = agent_kwargs,
+        memory = memory,
+    )
+    agent_response = agent.run(send_message)
+    print(agent_response)
+    # agent_openai = OpenAIFunctionsAgent(llm = agent_llm, tools = agent_tools, prompt = agent_prompt)
+    # agent_executor = AgentExecutor(agent = agent_openai, tools = agent_tools, verbose = True)
+
+    return jsonify(agent_response), status.HTTP_200_OK
