@@ -1,47 +1,51 @@
 # pylint: disable=E0401
 # pylint: disable=W0611
-
+from __future__ import annotations
 import os
+import status  # HTTP Status Codes
+import numpy as np
+import re
+import fitz
+import concurrent.futures
 
+# from langchain.retrievers.knn import (KNNRetriever, create_index)
 from flask import Flask, redirect, render_template, request, url_for, jsonify
 from flask_cors import CORS
-
-import status  # HTTP Status Codes
 from dotenv import load_dotenv
-
-import openai
-
 from langchain import SerpAPIWrapper
 from langchain.llms import OpenAI
-
-# from langchain.document_loaders import UnstructuredHTMLLoader
 from langchain.chains import (
-    ConversationChain,
     ConversationalRetrievalChain,
     LLMChain,
     RetrievalQA,
 )
 from langchain.agents import (
-    OpenAIFunctionsAgent,
-    AgentExecutor,
     initialize_agent,
     Tool,
     AgentType,
 )
 from langchain.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
-from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from langchain.prompts import PromptTemplate, MessagesPlaceholder
 from langchain.prompts.chat import (
     ChatPromptTemplate,
     SystemMessagePromptTemplate,
     HumanMessagePromptTemplate,
 )
-from langchain.embeddings.sentence_transformer import SentenceTransformerEmbeddings
 from langchain.embeddings.openai import OpenAIEmbeddings
+# from langchain.embeddings.tensorflow_hub import TensorflowHubEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.document_loaders import PyPDFLoader
 from langchain.vectorstores import Chroma
+from sklearn.neighbors import NearestNeighbors
+from typing import Any, List, Optional
+from langchain.callbacks.manager import (
+    AsyncCallbackManagerForRetrieverRun,
+    CallbackManagerForRetrieverRun,
+)
+from langchain.embeddings.base import Embeddings
+from langchain.schema import BaseRetriever, Document
+
 
 ######################################################################
 # Initialize
@@ -53,24 +57,139 @@ os.environ["OPENAI_API_KEY"] = "sk-3Ved0J97KMHeGAXZXCawT3BlbkFJPO9tKarYq8eKfID2g
 os.environ[
     "SERPAPI_API_KEY"
 ] = "1395cc6c7eaf7514e460050cc27d499a252f2ffbe79070bcb0fa9e02f9055524"
+embedding_function = OpenAIEmbeddings()
 
-# memory
+######################################################################
+# Dealing pdf to chunks
+######################################################################
+def preprocess(text):
+    text = text.replace('\n', ' ')
+    text = re.sub('\s+', ' ', text)
+    return text
+
+
+def pdf_to_text(path, start_page=1, end_page=None):
+    doc = fitz.open(path)
+    total_pages = doc.page_count
+
+    if end_page is None:
+        end_page = total_pages
+
+    text_list = []
+
+    for i in range(start_page - 1, end_page):
+        text = doc.load_page(i).get_text("text")
+        text = preprocess(text)
+        text_list.append(text)
+
+    doc.close()
+    return text_list
+
+
+def text_to_chunks(texts, word_length=30, start_page=1):
+    text_toks = [t.split(' ') for t in texts]
+    chunks = []
+
+    for idx, words in enumerate(text_toks):
+        for i in range(0, len(words), word_length):
+            chunk = words[i : i + word_length]
+            if (
+                (i + word_length) > len(words)
+                and (len(chunk) < word_length)
+                and (len(text_toks) != (idx + 1))
+            ):
+                text_toks[idx + 1] = chunk + text_toks[idx + 1]
+                continue
+            chunk = ' '.join(chunk).strip()
+            chunk = f'[Page no. {idx+start_page}]' + ' ' + '"' + chunk + '"'
+            chunks.append(chunk)
+    return chunks
+
+
+######################################################################
+# KNNRetriever class
+######################################################################
+def create_index(contexts: List[str], embeddings: Embeddings) -> np.ndarray:
+    """
+    Create an index of embeddings for a list of contexts.
+
+    Args:
+        contexts: List of contexts to embed.
+        embeddings: Embeddings model to use.
+
+    Returns:
+        Index of embeddings.
+    """
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        return np.array(list(executor.map(embeddings.embed_query, contexts)))
+
+
+class KNNRetriever(BaseRetriever):
+    """KNN Retriever."""
+
+    embeddings: Embeddings
+    index: Any
+    texts: List[str]
+    k: int = 4
+    relevancy_threshold: Optional[float] = None
+
+    class Config:
+
+        """Configuration for this pydantic object."""
+
+        arbitrary_types_allowed = True
+
+    @classmethod
+    def from_texts(
+        cls, texts: List[str], embeddings: Embeddings, **kwargs: Any
+    ) -> KNNRetriever:
+        index = create_index(texts, embeddings)
+        return cls(embeddings=embeddings, index=index, texts=texts, **kwargs)
+
+    def _get_relevant_documents(
+        self, query: str
+    ) -> bool:
+        query_embeds = np.array(self.embeddings.embed_query(query))
+        # calc L2 norm
+        index_embeds = self.index / np.sqrt((self.index**2).sum(1, keepdims=True))
+        query_embeds = query_embeds / np.sqrt((query_embeds**2).sum())
+
+        similarities = index_embeds.dot(query_embeds)
+        sorted_ix = np.argsort(-similarities)
+
+        # for row in sorted_ix[0 : self.k]:
+        #     print("normalized_similarities: ", row, " ", similarities[row])
+
+        for row in sorted_ix[0 : self.k]:
+            if (similarities[row] >= self.relevancy_threshold):
+                return True
+        return False
+
+
+    async def _aget_relevant_documents(
+        self, query: str, *, run_manager: AsyncCallbackManagerForRetrieverRun
+    ) -> List[Document]:
+        raise NotImplementedError
+
+
+######################################################################
+# chat history memory
+######################################################################
 agent_kwargs = {
     "extra_prompt_messages": [MessagesPlaceholder(variable_name="memory")],
 }
 agent_memory = ConversationBufferMemory(memory_key="memory", return_messages=True)
 
+
+######################################################################
+# load document into Chroma for search_db_google
+######################################################################
 # Load Unstructured data
-loader = PyPDFLoader("nba.pdf")
+loader = PyPDFLoader("AUD.pdf")
 documents = loader.load()
 
-# Splitting data
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-# split it into chunks
-splitted_docs = text_splitter.split_documents(documents)
-
-# Create the embedding function
-embedding_function = OpenAIEmbeddings()
+# Split data
+splitted_docs = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50).split_documents(documents)
 
 # Store into vector store Chroma
 vector_space = Chroma.from_documents(
@@ -82,6 +201,42 @@ retriever = vector_space.as_retriever()
 
 
 ######################################################################
+# Initialize each knn_retriever
+######################################################################
+# knn_retriever for black list
+black_lists_chunks = text_to_chunks(pdf_to_text("AUD.pdf", start_page=1), start_page=1)
+black_lists_knn_retriever = KNNRetriever(
+    embeddings=embedding_function,
+    index=create_index(black_lists_chunks, embedding_function),
+    texts=black_lists_chunks,
+    k=5,
+    relevancy_threshold=0.8,
+)
+
+
+# knn_retriever for white list
+white_lists_chunks = text_to_chunks(pdf_to_text("AUD.pdf", start_page=1), start_page=1)
+white_lists_knn_retriever = KNNRetriever(
+    embeddings=embedding_function,
+    index=create_index(white_lists_chunks, embedding_function),
+    texts=white_lists_chunks,
+    k=5,
+    relevancy_threshold=0.8,
+)
+
+
+# knn_retriever for faq
+faq_chunks = text_to_chunks(pdf_to_text("AUD.pdf", start_page=1), start_page=1)
+faq_knn_retriever = KNNRetriever(
+    embeddings=embedding_function,
+    index=create_index(faq_chunks, embedding_function),
+    texts=faq_chunks,
+    k=5,
+    relevancy_threshold=0.8,
+)
+
+
+######################################################################
 # API using langchain with agent
 ######################################################################
 @app.route("/langchain/chat/agent/<string:send_message>", methods=["GET"])
@@ -90,10 +245,10 @@ def langchain_agent_get_response(send_message):
     Input the send_message
     Output the response
     """
-    # 第一次filter
-    # filter_check, filter_message = filter(send_message)
-    # if not filter_check:
-    #     return jsonify(filter_message), status.HTTP_200_OK
+
+    filter_check, filter_message = filter(send_message)
+    if not filter_check:
+        return jsonify(filter_message), status.HTTP_200_OK
 
     # 搜尋是否有預設答案
     # faq_check, faq_message = search_template_faq(filter_message)
@@ -101,7 +256,6 @@ def langchain_agent_get_response(send_message):
     #     opt_message = optimizer(faq_message)
     #     return jsonify(opt_message), status.HTTP_200_OK
 
-    # 用google搭配db找答案
     agent_check, agent_message = search_db_google(send_message)
     if not agent_check:
         # 把無答案存入faq template??
@@ -127,43 +281,21 @@ def langchain_agent_get_response(send_message):
 def filter(send_message):
     """
     Input the send_message
-    First, use GPT to determine the relation.
-    Secondly, use DB to determine the relation.
+    Use KNN to calculate the distance between black list and white list
     Return the relation.
     """
-    # Basic Preprocessing
-    send_message = send_message.strip().lower()
+    black_lists_result = black_lists_knn_retriever._get_relevant_documents(send_message)
 
-    # Use GPT to Evaluate Relevance
-    filter_template = """
-        Please evaluate the following description for relevance to the topic of [Your Topic]. If it is completely related, say 'True'. If it is not related at all, say 'False'. If it might be related but you need more information to determine, say 'More Information Needed'.
-        ----------------------
-        Description: {send_message}
-    """
-    filter_messages = [
-        SystemMessagePromptTemplate.from_template(filter_template),
-        HumanMessagePromptTemplate.from_template("{send_message}"),
-    ]
-    filter_prompt = ChatPromptTemplate.from_messages(filter_messages)
-    filter_llm = OpenAI(model_name="gpt-3.5-turbo", temperature=1)
-    filter_chain = LLMChain(
-        llm=filter_llm,
-        prompt=filter_prompt,
-        verbose=True,
-    )
-    filter_response = filter_chain({"send_message": send_message})
+    white_lists_result = white_lists_knn_retriever._get_relevant_documents(send_message)
 
-    if filter_response["text"] == "False" or filter_response["text"] == "false":
+    if not black_lists_result and white_lists_result:
+        return True, send_message
+    
+    if black_lists_result and not white_lists_result:
         filter_error = """
             Sorry, this is not related to [Your Topic].
         """
         return False, filter_error
-    if filter_response["text"] == "True" or filter_response["text"] == "true":
-        return True, send_message
-    filter_suspect = """
-        Please provide more details or clarify your question.
-    """
-    return "More Information Needed", filter_suspect
 
 
 def search_template_faq(send_message):
