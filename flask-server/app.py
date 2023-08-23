@@ -1,22 +1,22 @@
 # pylint: disable=E0401
 # pylint: disable=W0611
+# pylint: disable=W0212
+# pylint: disable=C0301
 from __future__ import annotations
 import os
+import re
+import concurrent.futures
+from typing import Any, List, Optional, Tuple
+import fitz
 import status  # HTTP Status Codes
 import numpy as np
-import re
-import fitz
-import concurrent.futures
-
-# from langchain.retrievers.knn import (KNNRetriever, create_index)
-from flask import Flask, redirect, render_template, request, url_for, jsonify
+from flask import Flask, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 from langchain import SerpAPIWrapper
 from langchain.llms import OpenAI
 from langchain.chains import (
     ConversationalRetrievalChain,
-    LLMChain,
     RetrievalQA,
 )
 from langchain.agents import (
@@ -33,15 +33,11 @@ from langchain.prompts.chat import (
     HumanMessagePromptTemplate,
 )
 from langchain.embeddings.openai import OpenAIEmbeddings
-# from langchain.embeddings.tensorflow_hub import TensorflowHubEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.document_loaders import PyPDFLoader
 from langchain.vectorstores import Chroma
-from sklearn.neighbors import NearestNeighbors
-from typing import Any, List, Optional
 from langchain.callbacks.manager import (
     AsyncCallbackManagerForRetrieverRun,
-    CallbackManagerForRetrieverRun,
 )
 from langchain.embeddings.base import Embeddings
 from langchain.schema import BaseRetriever, Document
@@ -53,22 +49,49 @@ from langchain.schema import BaseRetriever, Document
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
-os.environ["OPENAI_API_KEY"] = "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"
+os.environ["OPENAI_API_KEY"] = "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"
 os.environ[
     "SERPAPI_API_KEY"
 ] = "1395cc6c7eaf7514e460050cc27d499a252f2ffbe79070bcb0fa9e02f9055524"
 embedding_function = OpenAIEmbeddings()
 
+
 ######################################################################
 # Dealing pdf to chunks
 ######################################################################
 def preprocess(text):
-    text = text.replace('\n', ' ')
-    text = re.sub('\s+', ' ', text)
+    """
+    Preprocess the given text by performing the following operations:
+
+    1. Replace newline characters with spaces.
+    2. Replace multiple consecutive whitespace characters with a single space.
+
+    Parameters:
+    - text (str): The input text to be preprocessed.
+
+    Returns:
+    - str: The preprocessed text.
+    """
+    text = text.replace("\n", " ")
+    text = re.sub("\s+", " ", text)
     return text
 
 
 def pdf_to_text(path, start_page=1, end_page=None):
+    """
+    Extract text from a PDF document and return it as a list of strings, where each string represents the text of a page.
+
+    Parameters:
+    - path (str): The path to the PDF document.
+    - start_page (int, optional): The starting page number from which to extract text. Defaults to 1.
+    - end_page (int, optional): The ending page number up to which to extract text. If not specified, extracts up to the last page.
+
+    Returns:
+    - list of str: A list containing the extracted text from each page, preprocessed using the preprocess function.
+
+    Note:
+    This function requires the `PyMuPDF` library (imported as `fitz`).
+    """
     doc = fitz.open(path)
     total_pages = doc.page_count
 
@@ -86,23 +109,63 @@ def pdf_to_text(path, start_page=1, end_page=None):
     return text_list
 
 
-def text_to_chunks(texts, word_length=30, start_page=1):
-    text_toks = [t.split(' ') for t in texts]
+def text_to_chunks_by_word_length(texts, word_length=30, start_page=1):
+    """
+    Split a list of texts into chunks of a specified word length. Each chunk is prefixed with its corresponding page number.
+
+    Parameters:
+    - texts (list of str): A list of texts, where each text typically represents the content of a page.
+    - word_length (int, optional): The desired number of words in each chunk. Defaults to 30.
+    - start_page (int, optional): The starting page number for the first text in the list. Defaults to 1.
+
+    Returns:
+    - list of str: A list of text chunks, where each chunk is prefixed with its page number.
+
+    Note:
+    If the last chunk of a text is shorter than the desired word length and it's not the last text in the list,
+    the remaining words are prepended to the next text in the list.
+    """
+    text_tokens = [t.split(" ") for t in texts]
     chunks = []
 
-    for idx, words in enumerate(text_toks):
+    for idx, words in enumerate(text_tokens):
         for i in range(0, len(words), word_length):
             chunk = words[i : i + word_length]
             if (
                 (i + word_length) > len(words)
                 and (len(chunk) < word_length)
-                and (len(text_toks) != (idx + 1))
+                and (len(text_tokens) != (idx + 1))
             ):
-                text_toks[idx + 1] = chunk + text_toks[idx + 1]
+                text_tokens[idx + 1] = chunk + text_tokens[idx + 1]
                 continue
-            chunk = ' '.join(chunk).strip()
-            chunk = f'[Page no. {idx+start_page}]' + ' ' + '"' + chunk + '"'
+            chunk = " ".join(chunk).strip()
+            chunk = f"[Page no. {idx+start_page}]" + " " + '"' + chunk + '"'
             chunks.append(chunk)
+    return chunks
+
+
+def text_to_chunks_by_semicolon(texts, start_page=1):
+    """
+    Split a list of texts into chunks based on semicolons. Each chunk is prefixed with its corresponding page number.
+
+    Parameters:
+    - texts (list of str): A list of texts, where each text typically represents the content of a page.
+    - start_page (int, optional): The starting page number for the first text in the list. Defaults to 1.
+
+    Returns:
+    - list of str: A list of text chunks, where each chunk is prefixed with its page number.
+
+    Note:
+    The function splits the text wherever it finds a semicolon.
+    """
+    chunks = []
+
+    for idx, text in enumerate(texts):
+        for chunk in text.split(";"):
+            chunk = chunk.strip()
+            if chunk:  # Check if the chunk is not empty
+                chunk = f"[Page no. {idx+start_page}]" + " " + '"' + chunk + '"'
+                chunks.append(chunk)
     return chunks
 
 
@@ -125,8 +188,19 @@ def create_index(contexts: List[str], embeddings: Embeddings) -> np.ndarray:
 
 
 class KNNRetriever(BaseRetriever):
-    """KNN Retriever."""
+    """
+    A K-Nearest Neighbors (KNN) based retriever for finding relevant documents based on embeddings.
 
+    Attributes:
+    - embeddings (Embeddings): The embeddings used for representing the texts.
+    - index (Any): The index structure holding the embeddings of the texts.
+    - texts (List[str]): The list of texts/documents.
+    - k (int): The number of nearest neighbors to consider. Defaults to 4.
+    - relevancy_threshold (Optional[float]): A threshold for similarity score to consider a document as relevant.
+
+    Note:
+    This class inherits from `BaseRetriever` and should implement all its abstract methods.
+    """
     embeddings: Embeddings
     index: Any
     texts: List[str]
@@ -134,21 +208,38 @@ class KNNRetriever(BaseRetriever):
     relevancy_threshold: Optional[float] = None
 
     class Config:
-
-        """Configuration for this pydantic object."""
-
         arbitrary_types_allowed = True
 
     @classmethod
     def from_texts(
         cls, texts: List[str], embeddings: Embeddings, **kwargs: Any
     ) -> KNNRetriever:
+        """
+        Class method to create an instance of KNNRetriever from a list of texts and embeddings.
+
+        Parameters:
+        - texts (List[str]): The list of texts/documents.
+        - embeddings (Embeddings): The embeddings used for representing the texts.
+        - **kwargs: Additional keyword arguments.
+
+        Returns:
+        - KNNRetriever: An instance of the KNNRetriever class.
+        """
         index = create_index(texts, embeddings)
         return cls(embeddings=embeddings, index=index, texts=texts, **kwargs)
 
-    def _get_relevant_documents(
-        self, query: str
-    ) -> bool:
+    def _get_relevant_documents(self, query: str) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if there are any relevant documents for the given query based on similarity scores and return the most relevant one.
+
+        Parameters:
+        - query (str): The query string.
+
+        Returns:
+        - tuple:
+            - bool: True if there's at least one relevant document, otherwise False.
+            - str or None: The most relevant document if found, otherwise None.
+        """
         query_embeds = np.array(self.embeddings.embed_query(query))
         # calc L2 norm
         index_embeds = self.index / np.sqrt((self.index**2).sum(1, keepdims=True))
@@ -157,18 +248,24 @@ class KNNRetriever(BaseRetriever):
         similarities = index_embeds.dot(query_embeds)
         sorted_ix = np.argsort(-similarities)
 
-        # for row in sorted_ix[0 : self.k]:
-        #     print("normalized_similarities: ", row, " ", similarities[row])
-
-        for row in sorted_ix[0 : self.k]:
-            if (similarities[row] >= self.relevancy_threshold):
-                return True
-        return False
-
+        # Check the most relevant chunk based on the highest similarity score
+        if similarities[sorted_ix[0]] >= self.relevancy_threshold:
+            return True, self.texts[sorted_ix[0]]
+        return False, None
 
     async def _aget_relevant_documents(
         self, query: str, *, run_manager: AsyncCallbackManagerForRetrieverRun
     ) -> List[Document]:
+        """
+        Asynchronous method to get relevant documents for the given query. This method is not implemented.
+
+        Parameters:
+        - query (str): The query string.
+        - run_manager (AsyncCallbackManagerForRetrieverRun): The callback manager for the retriever run.
+
+        Raises:
+        - NotImplementedError: This method is not implemented.
+        """
         raise NotImplementedError
 
 
@@ -185,11 +282,13 @@ agent_memory = ConversationBufferMemory(memory_key="memory", return_messages=Tru
 # load document into Chroma for search_db_google
 ######################################################################
 # Load Unstructured data
-loader = PyPDFLoader("AUD.pdf")
+loader = PyPDFLoader("docs/AUD_questions.pdf")
 documents = loader.load()
 
 # Split data
-splitted_docs = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50).split_documents(documents)
+splitted_docs = RecursiveCharacterTextSplitter(
+    chunk_size=500, chunk_overlap=50
+).split_documents(documents)
 
 # Store into vector store Chroma
 vector_space = Chroma.from_documents(
@@ -204,7 +303,9 @@ retriever = vector_space.as_retriever()
 # Initialize each knn_retriever
 ######################################################################
 # knn_retriever for black list
-black_lists_chunks = text_to_chunks(pdf_to_text("AUD.pdf", start_page=1), start_page=1)
+black_lists_chunks = text_to_chunks_by_word_length(
+    pdf_to_text("docs/blacklist.pdf", start_page=1), start_page=1
+)
 black_lists_knn_retriever = KNNRetriever(
     embeddings=embedding_function,
     index=create_index(black_lists_chunks, embedding_function),
@@ -215,7 +316,9 @@ black_lists_knn_retriever = KNNRetriever(
 
 
 # knn_retriever for white list
-white_lists_chunks = text_to_chunks(pdf_to_text("AUD.pdf", start_page=1), start_page=1)
+white_lists_chunks = text_to_chunks_by_word_length(
+    pdf_to_text("docs/whitelist.pdf", start_page=1), start_page=1
+)
 white_lists_knn_retriever = KNNRetriever(
     embeddings=embedding_function,
     index=create_index(white_lists_chunks, embedding_function),
@@ -226,13 +329,15 @@ white_lists_knn_retriever = KNNRetriever(
 
 
 # knn_retriever for faq
-faq_chunks = text_to_chunks(pdf_to_text("AUD.pdf", start_page=1), start_page=1)
+faq_chunks = text_to_chunks_by_semicolon(
+    pdf_to_text("docs/faq.pdf", start_page=1), start_page=1
+)
 faq_knn_retriever = KNNRetriever(
     embeddings=embedding_function,
     index=create_index(faq_chunks, embedding_function),
     texts=faq_chunks,
     k=5,
-    relevancy_threshold=0.8,
+    relevancy_threshold=0.9,
 )
 
 
@@ -246,93 +351,120 @@ def langchain_agent_get_response(send_message):
     Output the response
     """
 
-    filter_check, filter_message = filter(send_message)
+    filter_check, filter_message = black_white_list_filter(send_message)
+    print("filter_check: ", filter_check)
+    print("filter_message: ", filter_message)
     if not filter_check:
         return jsonify(filter_message), status.HTTP_200_OK
 
-    # 搜尋是否有預設答案
-    # faq_check, faq_message = search_template_faq(filter_message)
-    # if faq_check:
-    #     opt_message = optimizer(faq_message)
-    #     return jsonify(opt_message), status.HTTP_200_OK
+    faq_check, faq_message = search_template_faq(filter_message)
+    print("faq_check: ", faq_check)
+    print("faq_message: ", faq_message)
+    if faq_check:
+        opt_message = optimizer(faq_message)
+        return jsonify(opt_message), status.HTTP_200_OK
 
     agent_check, agent_message = search_db_google(send_message)
+    print("agent_check: ", agent_check)
+    print("agent_message: ", agent_message)
     if not agent_check:
-        # 把無答案存入faq template??
         return jsonify(agent_message), status.HTTP_200_OK
 
-    # 是否要再filter一次???
-    # last_filter_check, last_filter_message = validate_preprocess_and_check_relevance(
-    #     agent_message
-    # )
-    # if not last_filter_check:
-    #     return jsonify(last_filter_message), status.HTTP_200_OK
-
-    # 輸出前優化
     # opt_response = optimizer(last_filter_message)
 
-    # 將答案存回FAQ
     # store_response(send_message, opt_response)
 
-    # 輸出
     return jsonify(agent_message), status.HTTP_200_OK
 
 
-def filter(send_message):
+def black_white_list_filter(send_message: str) -> Tuple[bool, str]:
     """
-    Input the send_message
-    Use KNN to calculate the distance between black list and white list
-    Return the relation.
+    Filters a given message based on its relevance to black and white lists using KNN retrievers.
+
+    The function checks the message against two KNN retrievers: one for black lists and one for white lists.
+    - If the message is not in the black list and is in the white list, it is considered valid.
+    - If the message is in the black list and not in the white list, an error message is returned.
+
+    Parameters:
+    - send_message (str): The message to be filtered.
+
+    Returns:
+    - tuple:
+        - bool: True if the message is valid, otherwise False.
+        - str: The original message if it's valid, otherwise an error message.
+
+    Note:
+    This function assumes the existence of `black_lists_knn_retriever` and `white_lists_knn_retriever` in the global scope.
     """
-    black_lists_result = black_lists_knn_retriever._get_relevant_documents(send_message)
+    (
+        black_lists_is_relevant,
+        black_lists_relevant_document,
+    ) = black_lists_knn_retriever._get_relevant_documents(send_message)
+    (
+        white_lists_is_relevant,
+        white_lists_relevant_document,
+    ) = white_lists_knn_retriever._get_relevant_documents(send_message)
 
-    white_lists_result = white_lists_knn_retriever._get_relevant_documents(send_message)
-
-    if not black_lists_result and white_lists_result:
+    if not black_lists_is_relevant and white_lists_is_relevant:
         return True, send_message
-    
-    if black_lists_result and not white_lists_result:
+
+    if black_lists_is_relevant and not white_lists_is_relevant:
         filter_error = """
             Sorry, this is not related to [Your Topic].
         """
         return False, filter_error
 
+    # Default return if neither condition is met
+    return False, "Sorry, this is not related to [Your Topic]."
 
-def search_template_faq(send_message):
+
+def search_template_faq(send_message: str) -> Tuple[bool, Optional[str]]:
     """
-    Input the send_message.
-    Search the FAQ.
-    Return the answer.
+    Searches for a relevant FAQ document based on the given message using a KNN retriever.
+
+    The function queries the `faq_knn_retriever` to find a relevant FAQ document. If a relevant document is found,
+    it returns `True` and the document. Otherwise, it returns `False` and `None`.
+
+    Parameters:
+    - send_message (str): The message or query to be searched for in the FAQ documents.
+
+    Returns:
+    - tuple:
+        - bool: True if a relevant FAQ document is found, otherwise False.
+        - str or None: The relevant FAQ document if found, otherwise None.
+
+    Note:
+    This function assumes the existence of `faq_knn_retriever` in the global scope or as a class attribute.
     """
-    faq_template = """
-    Using the below description, please search the database for any matching questions and answers (FAQ) that is related to and can answer the description. Return the relevant results, if available. If cannot find any match, just return 'False'.
-    ----------------------
-    Description: {send_message}
-    """
-    faq_messages = [
-        SystemMessagePromptTemplate.from_template(faq_template),
-        HumanMessagePromptTemplate.from_template("{send_message}"),
-    ]
-    faq_prompt = ChatPromptTemplate.from_messages(faq_messages)
-    faq_llm = OpenAI(model_name="gpt-3.5-turbo-16k", temperature=0.2)
-    faq_chain = ConversationalRetrievalChain.from_llm(
-        llm=faq_llm,
-        retriever=faq_retriever,
-        condense_question_prompt=faq_prompt,
-        verbose=True,
+    faq_is_relevant, faq_relevant_document = faq_knn_retriever._get_relevant_documents(
+        send_message
     )
-    faq_response = faq_chain({"send_message": send_message})
 
-    if faq_response["answer"] == "False" or faq_response["answer"] == "false":
-        return False, send_message
-    return True, faq_response["answer"]
+    if not faq_is_relevant:
+        return False, None
+    return True, faq_relevant_document
 
 
-def search_db_google(send_message):
+def search_db_google(send_message: str) -> Tuple[bool, str]:
     """
-    Input the send_message
-    Use agent to determine whether use DB, Google, GPT to get the response.
-    Return the response.
+    Searches for an answer to the given message first in a database, then on Google, and finally using the assistant's own knowledge.
+
+    The function follows a hierarchical approach:
+    1. Search in the database.
+    2. If no useful information is found in the database, search on Google.
+    3. If no useful information is found on Google, answer using the assistant's knowledge.
+    4. If the assistant doesn't know the answer, it will return that it doesn't know.
+
+    Parameters:
+    - send_message (str): The message or query to be searched for.
+
+    Returns:
+    - tuple:
+        - bool: True if the agent found a relevant response, otherwise False.
+        - str: The agent's response or answer to the query.
+
+    Note:
+    This function assumes the existence of various tools and models like `SerpAPIWrapper`, `ChatOpenAI`, `RetrievalQA`, etc., and their appropriate configurations.
     """
     agent_template = """
         You are a very powerful assistant.
@@ -344,7 +476,7 @@ def search_db_google(send_message):
         template=agent_template,
     )
     agent_search = SerpAPIWrapper()
-    agent_llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0.2)
+    agent_llm = ChatOpenAI(model_name="gpt-4", temperature=0.2)
     agent_db = RetrievalQA.from_chain_type(
         llm=agent_llm, chain_type="stuff", retriever=retriever
     )

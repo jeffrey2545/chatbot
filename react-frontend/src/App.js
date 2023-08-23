@@ -11,6 +11,7 @@ const App = (props) => {
         config={config}
         messageParser={MessageParser}
         actionProvider={ActionProvider}
+        className="ChatbotClass"
       />
     </div>
   );

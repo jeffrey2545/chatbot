@@ -1,8 +1,12 @@
 {
     "cSpell.words": [
+        "aget",
+        "fitz",
         "jsonify",
         "langchain",
         "OPENAI",
+        "Serp",
+        "SERPAPI",
         "vectorstores"
     ]
 }
